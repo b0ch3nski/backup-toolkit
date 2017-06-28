@@ -131,9 +131,9 @@ readonly timestamp="$(date +%s)"
 log "[phase 2] mount, backup, umount and remove snapshot volumes" "${RED}"
 for lv in ${created_snapshot_vols}; do
   # hostname-original_lv_name
-  backup_name="$(hostname)-$(echo ${lv} | awk -F'_' '{ print $2 }')"
+  backup_name="$(hostname)-$(awk -F'_' '{ print $2 }' <<< ${lv})"
   # /mnt/vg-snapshot_lv_name
-  mount_path="/mnt/$(echo ${lv} | sed 's/\//-/')"
+  mount_path="/mnt/$(sed 's/\//-/' <<< ${lv})"
 
   log "mounting '/dev/${lv}' to '${mount_path}'" "${YLW}"
   mkdir ${mount_path}
