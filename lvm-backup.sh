@@ -64,9 +64,6 @@ done
 validate_config "${CFG_FILE}"
 source "${CFG_FILE}"
 
-# fail if required binary dependencies are missing
-dep_check "lvm git bup par2"
-
 # fail if required variables are not set
 if [[ -z "${INCLUDE_VG// }" || -z "${INCLUDE_LV// }" ]]; then
   print_info_msg
@@ -85,9 +82,18 @@ fi
 
 print_info_msg
 
-# check if $BACKUP_DIR is a valid Git/Bup repository
+# fail if required binary dependencies are missing
+dep_check "lvm git bup par2"
+
+# fail if $BACKUP_DIR is not a valid Git/Bup repository
 if [[ "$(GIT_DIR=${BACKUP_DIR} git rev-parse >/dev/null 2>&1; echo $?)" != 0 ]]; then
   log "'${BACKUP_DIR}' is not a valid Git/Bup repository" "${RED}" >&2
+  exit 1
+fi
+
+# fail if user is not root
+if [[ ${EUID} != 0 ]]; then
+  log "this script requires root privileges" "${RED}" >&2
   exit 1
 fi
 
