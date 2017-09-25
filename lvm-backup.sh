@@ -3,31 +3,26 @@ set -eo pipefail
 
 source "${0%/*}/common.sh"
 
-# list all volume groups that match global $INCLUDE_VG (regex)
-list_volume_groups() { vgs --readonly --noheadings -o vg_name --select 'vg_name =~ '${INCLUDE_VG}'' | tr -d ' '; }
+# constant variables - you should not change these unless you know what are you doing
+readonly SNAP_SIZE_UNIT="k"
+readonly SNAP_VOL_PREFIX="snap"
+readonly SNAP_MOUNT_PATH="/mnt"
 
-# list all logical volumes for selected volume group $1 that match global $INCLUDE_LV (regex)
-list_logical_vols() { lvs --readonly --noheadings -o lv_name --select 'vg_name = '${1}' && lv_name =~ '${INCLUDE_LV}'' | tr -d ' '; }
-
-# calculate size of snapshot volume considering free space on volume group $1, amount of volumes $2 and global $KEEP_VG_FREE limit
-get_snapshot_vol_size() {
-  local -r unit="k"
-  local -r free="$(vgs --readonly --noheadings --units ${unit} -o vg_free --select 'vg_name = '${1}'' | tr -d ' ' | cut -d "." -f1)"
-  echo "$(( (((100 - ${KEEP_VG_FREE}) * ${free}) / 100) / ${2} ))${unit}"
-}
-
-# get list of '$1/path' to exclude from backup formatted as a list of '--exclude-rx=pattern' bup index parameters
-get_exclusion_params() {
-  local args=() i=0
-  for dir in ${EXCLUDE_DIRS}; do
-    args[$i]="--exclude-rx=\"^${1}/${dir}\""
-    ((++i))
-  done
-  echo "${args[@]}"
+# fail if required variables are not set
+# assign default values for optional variables if not set
+setup_variables() {
+  fail_when_empty "${INCLUDE_VG} ${INCLUDE_LV}" "required variables are not set"
+  : "${NONINTERACTIVE:=false}"
+  : "${KEEP_VG_FREE:=15}"
+  : "${BACKUP_DIR:=$(pwd)}"
+  : "${BACKUP_COMPRESS:=0}"
+  : "${BACKUP_FSCK:=true}"
+  : "${LOW_PRIORITY:=false}"
+  : "${BACKUP_STATUS:=false}"
 }
 
 # print welcome/info message
-print_info_msg() {
+usage() {
   echo -e \
     "${RED}lvm-backup.sh\n" \
     "${LGRN}-h|--help                        " "${NRM}Print this message\n" \
@@ -43,129 +38,169 @@ print_info_msg() {
     "${LGRN}<config-file>    " "${BLU}BACKUP_STATUS  " "${NRM}Print each indexed file with it's status (A, M, D, or space)" "${GRN}[optional]" "${RED}${BACKUP_STATUS}${NRM}"
 }
 
-# parse command line arguments
-for arg in "${@}"; do
-  case ${arg} in
-    -h|--help)
-      print_info_msg
-      exit 0 ;;
-    --non-interactive)
-      NONINTERACTIVE="true"
-      shift ;;
-    --config=*)
-      CFG_FILE="${arg#*=}"
-      shift ;;
-    *) ;; # unknown parameter passed - ignoring
-  esac
-done
-
-# validate and read config file
-[[ -z "${CFG_FILE// }" || ! -f "${CFG_FILE}" ]] && CFG_FILE="${0%/*}/lvm-backup.cfg"
-validate_config "${CFG_FILE}"
-source "${CFG_FILE}"
-
-# fail if required variables are not set
-if [[ -z "${INCLUDE_VG// }" || -z "${INCLUDE_LV// }" ]]; then
-  print_info_msg
-  log "required variables are not set" "${RED}" >&2
-  exit 1
-fi
-
-# set default values for optional variables
-: "${NONINTERACTIVE:=false}"
-: "${KEEP_VG_FREE:=15}"
-: "${BACKUP_DIR:=$(pwd)}"
-: "${BACKUP_COMPRESS:=0}"
-: "${BACKUP_FSCK:=true}"
-: "${LOW_PRIORITY:=false}"
-: "${BACKUP_STATUS:=false}"
-
-print_info_msg
-
-# fail if required binary dependencies are missing
-dep_check "lvm git bup par2"
-
-# fail if $BACKUP_DIR is not a valid Git/Bup repository
-if [[ "$(GIT_DIR=${BACKUP_DIR} git rev-parse >/dev/null 2>&1; echo $?)" != 0 ]]; then
-  log "'${BACKUP_DIR}' is not a valid Git/Bup repository" "${RED}" >&2
-  exit 1
-fi
+# fail if $BACKUP_DIR is not a valid Git (Bup) repository
+validate_git_dir() {
+  if [[ "$(GIT_DIR=${BACKUP_DIR} git rev-parse >/dev/null 2>&1; echo $?)" != 0 ]]; then
+    log "'${BACKUP_DIR}' is not a valid Git/Bup repository" "${RED}" >&2
+    exit 1
+  fi
+}
 
 # fail if user is not root
-if [[ ${EUID} != 0 ]]; then
-  log "this script requires root privileges" "${RED}" >&2
-  exit 1
-fi
+validate_root_user() {
+  if [[ "${EUID}" != 0 ]]; then
+    log "this script requires root privileges" "${RED}" >&2
+    exit 1
+  fi
+}
 
-# interactive sanity check
-if [[ "${NONINTERACTIVE}" = false ]]; then
-  echo -en "${RED}Is that correct? Proceed? (y/n): "
-  read -n 1 -r
-  echo -e "${NRM}\n"
-  [[ ${REPLY} =~ ^[Yy]$ ]] || exit 0
-fi
+# list all volume groups that match $INCLUDE_VG (regex)
+list_volume_groups() {
+  vgs --readonly --noheadings -o vg_name --select "vg_name =~ "${INCLUDE_VG}"" | tr -d " "
+}
+
+# list all logical volumes for selected volume group $1 that match $INCLUDE_LV (regex)
+list_logical_vols() {
+  lvs --readonly --noheadings -o lv_name --select "vg_name = "${1}" && lv_name =~ "${INCLUDE_LV}"" | tr -d " "
+}
+
+# calculate size of snapshot volume considering free space on volume group $1, amount of volumes $2 and $KEEP_VG_FREE limit
+get_snapshot_vol_size() {
+  local -r free="$(vgs --readonly --noheadings --units "${SNAP_SIZE_UNIT}" -o vg_free --select "vg_name = "${1}"" | grep -Eo '[0-9]+' | head -1)"
+
+  if (( "${free}" > 0 )); then
+    echo "$(( (((100 - ${KEEP_VG_FREE}) * ${free}) / 100) / ${2} ))${SNAP_SIZE_UNIT}"
+  else
+    log "volume group '${1}' has no free space left (${free}${SNAP_SIZE_UNIT})" "${RED}" >&2
+    exit 1
+  fi
+}
+
+# create snapshot of $1 volume with $2 name and $3 size
+create_lv_snapshot() {
+  log "creating snapshot volume '${2}' of '${1}' with size '${3}'" "${MGT}"
+  lvcreate --yes --snapshot --name "${2}" --size "${3}" "${1}"
+}
+
+# translate boolean variables to execution parameters for eval
+is_low_priority() { [[ "${LOW_PRIORITY}" = true ]] && LOW_PRIORITY="nice -n19 ionice -c2 -n7" || unset LOW_PRIORITY; }
+is_backup_status() { [[ "${BACKUP_STATUS}" = true ]] && BACKUP_STATUS="--status" || unset BACKUP_STATUS; }
+
+# transform $1 'vg_name/$SNAP_VOL_PREFIX_original_lv_name' to backup name 'hostname-original_lv_name'
+get_backup_name() { echo "$(hostname)-$(awk -F'_' '{ print $2 }' <<< "${1}")"; }
+
+# replace '/' with '-' in $1 'vg_name/$SNAP_VOL_PREFIX_original_lv_name'
+get_mount_path() { sed 's/\//-/' <<< "${1}"; }
+
+# mount $1 'vg_name/snapshot_lv_name' to $2 location
+mount_wrapper() {
+  log "mounting '/dev/${1}' to '${2}'" "${YLW}"
+  mkdir -pv "${2}"
+  mount -rv "/dev/${1}" "${2}"
+}
+
+# get list of '$1/path' to exclude from backup formatted as a list of '--exclude-rx=pattern' bup index parameters
+get_exclusion_params() {
+  local args=() i=0
+  for dir in ${EXCLUDE_DIRS}; do
+    args[$i]="--exclude-rx=\"^${1}/${dir}\""
+    ((++i))
+  done
+  echo "${args[@]}"
+}
+
+# index $1 location using Bup
+bup_index() {
+  log "indexing '${1}'" "${CYA}"
+  eval "BUP_DIR=${BACKUP_DIR}" "${LOW_PRIORITY}" \
+    bup index --update --one-file-system --no-check-device "$(get_exclusion_params "${1}")" "${BACKUP_STATUS}" "${1}"
+}
+
+# convert $1 time in unix timestamp (seconds) to "Y-m-d T" format
+unix_to_human_time() { date -d @${1} "+%Y-%m-%d %T"; }
+
+# backup $1 location with $2 name and $3 unix timestamp (seconds)
+bup_save() {
+  log "backing up '${1}' with name '${2}' and timestamp '$(unix_to_human_time "${3}")'" "${GRN}"
+  eval "BUP_DIR=${BACKUP_DIR}" "${LOW_PRIORITY}" \
+    bup save --strip "${1}" --name="${2}" --date="${3}" --compress="${BACKUP_COMPRESS}" "${1}"
+}
+
+# unmount file system mounted at $1 location
+unmount_wrapper() {
+  log "unmounting '${1}'" "${YLW}"
+  sync
+  umount -v "${1}"
+  rmdir -v "${1}"
+}
+
+# remove $1 logical volume
+remove_lv() {
+  log "removing logical volume '${1}'" "${MGT}"
+  lvremove --yes "${1}"
+}
+
+# generate Bup backup recovery blocks
+bup_fsck() {
+  log "[phase 3] generate backup recovery blocks" "${RED}"
+  eval "BUP_DIR=${BACKUP_DIR}" "${LOW_PRIORITY}" \
+    bup fsck --generate --quick
+}
+
+# get human readable size of $1 directory
+get_dir_size() { du -sh "${1}" | awk '{ print $1 }'; }
+
+
+# main flow
+parse_arguments "${@}"
+load_config "${CFG_FILE}" "lvm-backup.cfg"
+setup_variables
+usage
+ensure_deps "lvm git bup par2"
+validate_git_dir
+validate_root_user
+sanity_check
 
 readonly vol_groups="$(list_volume_groups)"
-[[ -z "${vol_groups// }" ]] && { log "no VGs found matching '${INCLUDE_VG}'" "${RED}" >&2; exit 1; }
+fail_when_empty "${vol_groups}" "no VGs found matching '${INCLUDE_VG}'"
 
 log "[phase 1] create snapshot volumes" "${RED}"
-created_snapshot_vols=""
+created_snap_vols=""
+
 for vg in ${vol_groups}; do
-  logical_vols="$(list_logical_vols ${vg})"
-  [[ -z "${logical_vols// }" ]] && { log "no LVs found matching '${INCLUDE_LV}'" "${RED}" >&2; exit 1; }
+  logical_vols="$(list_logical_vols "${vg}")"
+  fail_when_empty "${logical_vols}" "no LVs found matching '${INCLUDE_LV}'"
 
   logical_vols_num="$(wc -l <<< "${logical_vols}")"
+  snap_vol_size="$(get_snapshot_vol_size "${vg}" "${logical_vols_num}")"
   log "volume group: ${vg} | logical volumes: ${logical_vols_num}" "${BLU}"
-  snapshot_vol_size="$(get_snapshot_vol_size ${vg} ${logical_vols_num})"
 
   for lv in ${logical_vols}; do
-    snapshot_vol_name="snap_${lv}"
-    log "creating snapshot volume '${snapshot_vol_name}' of LV '${vg}/${lv}' with size '${snapshot_vol_size}'" "${GRN}"
+    snap_vol_name="${SNAP_VOL_PREFIX}_${lv}"
+    created_snap_vols+=" ${vg}/${snap_vol_name}"
 
-    lvcreate -y -s -n ${snapshot_vol_name} -L ${snapshot_vol_size} ${vg}/${lv}
-    created_snapshot_vols+=" ${vg}/${snapshot_vol_name}"
+    create_lv_snapshot "${vg}/${lv}" "${snap_vol_name}" "${snap_vol_size}"
   done
 done
 
 # all backups should have the same time (as close as possible to snapshot creation time)
 readonly timestamp="$(date +%s)"
 
-# translate boolean variables to parameters for eval
-[[ "${LOW_PRIORITY}" = true ]] && LOW_PRIORITY="nice -n19 ionice -c2 -n7" || unset LOW_PRIORITY
-[[ "${BACKUP_STATUS}" = true ]] && BACKUP_STATUS="--status" || unset BACKUP_STATUS
+is_low_priority
+is_backup_status
 
 log "[phase 2] mount, backup, umount and remove snapshot volumes" "${RED}"
-for lv in ${created_snapshot_vols}; do
-  # hostname-original_lv_name
-  backup_name="$(hostname)-$(awk -F'_' '{ print $2 }' <<< ${lv})"
-  # /mnt/vg-snapshot_lv_name
-  mount_path="/mnt/$(sed 's/\//-/' <<< ${lv})"
+for lv in ${created_snap_vols}; do
+  mount_path="${SNAP_MOUNT_PATH}/$(get_mount_path "${lv}")"
 
-  log "mounting '/dev/${lv}' to '${mount_path}'" "${YLW}"
-  mkdir ${mount_path}
-  mount -o ro /dev/${lv} ${mount_path}
-
-  log "indexing '${mount_path}'" "${GRN}"
-  eval BUP_DIR=${BACKUP_DIR} ${LOW_PRIORITY} \
-    bup index --update --one-file-system --no-check-device $(get_exclusion_params ${mount_path}) ${BACKUP_STATUS} ${mount_path}
-
-  log "backing up '${mount_path}' with name '${backup_name}' and timestamp '$(human_time ${timestamp})'" "${GRN}"
-  eval BUP_DIR=${BACKUP_DIR} ${LOW_PRIORITY} \
-    bup save --strip ${mount_path} --date=${timestamp} --name=${backup_name} --compress=${BACKUP_COMPRESS} ${mount_path}
-
-  log "umounting '${mount_path}' and removing snapshot volume '${lv}'" "${YLW}"
-  sync
-  umount ${mount_path}
-  rmdir ${mount_path}
-  lvremove -y ${lv}
+  mount_wrapper "${lv}" "${mount_path}"
+  bup_index "${mount_path}"
+  bup_save "${mount_path}" "$(get_backup_name "${lv}")" "${timestamp}"
+  unmount_wrapper "${mount_path}"
+  remove_lv "${lv}"
 done
-
-if [[ "${BACKUP_FSCK}" = true ]]; then
-  log "[phase 3] generate backup recovery blocks" "${RED}"
-  eval BUP_DIR=${BACKUP_DIR} ${LOW_PRIORITY} \
-    bup fsck --generate --quick
-fi
+[[ "${BACKUP_FSCK}" = true ]] && bup_fsck
 
 log "[success] backup finished" "${RED}"
-log "took: $(human_time_elapsed ${timestamp})" "${BLU}"
-log "backup target '${BACKUP_DIR}' size: $(du -sh ${BACKUP_DIR} | awk '{ print $1 }')" "${BLU}"
+log "took: $(print_elapsed_time "${timestamp}")" "${BLU}"
+log "backup target '${BACKUP_DIR}' size: $(get_dir_size "${BACKUP_DIR}")" "${BLU}"

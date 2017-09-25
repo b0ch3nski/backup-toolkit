@@ -52,7 +52,14 @@ BUP_DIR=/backup/.bup bup init
 it periodically using [*systemd timers*](https://wiki.archlinux.org/index.php/Systemd/Timers) or
 old-fashioned *cron*).
 
-4) Restore your data:
+4) Inspect your backup:
+```bash
+BUP_DIR=/backup/.bup bup ls -l --human-readable
+```
+Following command will print all your backups. You can use it pretty much the same as normal ``ls`` command to
+browse the data structure.
+
+5) Restore your data:
 ```bash
 BUP_DIR=/backup/.bup bup restore -C /tmp/test /myhost-root/latest/.
 ```
