@@ -35,20 +35,20 @@ Automation wrapper written in **Bash** to create backups of **LVM partitions**
 
 #### Usage
 
-1) Initialize Bup repository in your backup target location (specify ``BUP_DIR`` variable):
+1) Initialize Bup repository in your backup target location (specify `BUP_DIR` variable):
 ```bash
 BUP_DIR=/backup/.bup bup init
 ```
 
-2) Customize ``lvm-backup.cfg`` configuration file with your volume groups, logical volumes, backup target, etc.
+2) Customize `lvm-backup.cfg` configuration file with your volume groups, logical volumes, backup target, etc.
 * **Hint:** You can create as many configuration files as you want - to control which one is used, pass
-``--config=<file>`` flag.
+`--config=<file>` flag.
 
 3) Backup your data:
 ```bash
-./lvm-backup.sh
+./lvm-backup
 ```
-* **Hint:** You can automate the backup procedure by passing ``--non-interactive`` flag (and, for example, run
+* **Hint:** You can automate the backup procedure by passing `--non-interactive` flag (and, for example, run
 it periodically using [*systemd timers*](https://wiki.archlinux.org/index.php/Systemd/Timers) or
 old-fashioned *cron*).
 
@@ -56,14 +56,14 @@ old-fashioned *cron*).
 ```bash
 BUP_DIR=/backup/.bup bup ls -l --human-readable
 ```
-Following command will print all your backups. You can use it pretty much the same as normal ``ls`` command to
+Following command will print all your backups. You can use it pretty much the same as normal `ls` command to
 browse the data structure.
 
 5) Restore your data:
 ```bash
 BUP_DIR=/backup/.bup bup restore -C /tmp/test /myhost-root/latest/.
 ```
-This example will restore ``latest`` backup of ``root`` partition from ``myhost`` to ``/tmp/test`` (it's a good
+This example will restore `latest` backup of `root` partition from `myhost` to `/tmp/test` (it's a good
 practice to test your backups for your extra confidence).
 
 For more restore examples see

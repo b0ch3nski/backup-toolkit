@@ -24,7 +24,7 @@ setup_variables() {
 # print welcome/info message
 usage() {
   echo -e \
-    "${RED}lvm-backup.sh\n" \
+    "${RED}${0##*/}\n" \
     "${LGRN}-h|--help                        " "${NRM}Print this message\n" \
     "${LGRN}--non-interactive                " "${NRM}Skip interactive sanity check                               " "${GRN}[optional]" "${RED}${NONINTERACTIVE}\n" \
     "${LGRN}--config=<file>                  " "${NRM}Use specific configuration file                             " "${GRN}[optional]" "${RED}${CFG_FILE}\n" \
