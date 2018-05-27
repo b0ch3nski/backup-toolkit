@@ -6,6 +6,7 @@ I take no responsibility for anything you find here. You are on your own using t
 that it will work for you. Please don't blame me for your damaged data - always test things like this on separated,
 safe environment first. You have been warned.
 
+
 ## lvm-backup
 Automation wrapper written in **Bash** to create backups of **LVM partitions**
 (with [LVM snapshots](http://www.tldp.org/HOWTO/LVM-HOWTO/snapshots_backup.html)) using
@@ -28,13 +29,13 @@ Automation wrapper written in **Bash** to create backups of **LVM partitions**
 * Because of LVM management, this script requires **root** privileges.
 
 #### Dependencies
+* bash
 * lvm2
 * git
 * bup
 * par2
 
 #### Usage
-
 1) Initialize Bup repository in your backup target location (specify `BUP_DIR` variable):
 ```bash
 BUP_DIR=/backup/.bup bup init
@@ -68,3 +69,34 @@ practice to test your backups for your extra confidence).
 
 For more restore examples see
 [official *bup-restore* documentation](https://github.com/bup/bup/blob/master/Documentation/bup-restore.md).
+
+
+## ios-backup
+Automation wrapper written in **Bash** to backup and organize media files captured by **iOS** devices.
+
+#### Features
+* Automatically mount and unmount **iOS** devices.
+* Backup photos and videos to defined target directories.
+* Rename media files to match specified date-based naming pattern.
+* Fancy, colorized console output.
+
+#### Drawbacks
+* There is no support for incremental backups - duplicates are not recognized during backup stage.
+
+#### Dependencies
+* bash
+* gvfs-afc
+* rsync
+* exiv2
+* mediainfo
+
+#### Usage
+1) Customize `ios-backup.cfg` configuration file according to your preferences.
+* **Hint:** You can create as many configuration files as you want - to control which one is used, pass
+`--config=<file>` flag.
+
+2) Backup your **iOS** device:
+```bash
+./ios-backup
+```
+* **Hint:** You can automate the backup procedure by passing `--non-interactive` flag.

@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+source "${0%/*}/common.sh"
+
+# constant variables - you should not change these unless you know what are you doing
+readonly PHOTO_EXT=(JPG jpg PNG png)
+readonly VIDEO_EXT=(MOV mov MP4 mp4)
+
+# fail if required variables are not set
+# assign default values for optional variables if not set
+setup_variables() {
+  fail_when_empty "${PHOTO_TARGET_DIR} ${VIDEO_TARGET_DIR}" "required variables are not set"
+  : "${NONINTERACTIVE:=false}"
+  : "${DATE_FORMAT:=%Y-%m-%d_%T}"
+  : "${PHOTO_TMP_DIR:=/tmp/photo-tmp}"
+  : "${VIDEO_TMP_DIR:=/tmp/video-tmp}"
+}
+
+# print welcome/info message
+usage() {
+  echo -e \
+    "${RED}${0##*/}\n" \
+    "${LGRN}-h|--help                         " "${NRM}Print this message\n" \
+    "${LGRN}--non-interactive                 " "${NRM}Skip interactive sanity check                         " "${GRN}[optional]" "${RED}${NONINTERACTIVE}\n" \
+    "${LGRN}--config=<file>                   " "${NRM}Use specific configuration file                       " "${GRN}[optional]" "${RED}${CFG_FILE}\n" \
+    "${LGRN}<config-file>    " "${BLU}PHOTO_TARGET_DIR" "${NRM}Directory where processed photos will be moved        " "${YLW}[required]" "${RED}${PHOTO_TARGET_DIR}\n" \
+    "${LGRN}<config-file>    " "${BLU}VIDEO_TARGET_DIR" "${NRM}Directory where processed videos will be moved        " "${YLW}[required]" "${RED}${VIDEO_TARGET_DIR}\n" \
+    "${LGRN}<config-file>    " "${BLU}IDEVICE_ID      " "${NRM}Backup specific idevice (if not set, use first found) " "${GRN}[optional]" "${RED}${IDEVICE_ID}\n" \
+    "${LGRN}<config-file>    " "${BLU}DATE_FORMAT     " "${NRM}Rename all media to specific format ('date' compliant)" "${GRN}[optional]" "${RED}${DATE_FORMAT}\n" \
+    "${LGRN}<config-file>    " "${BLU}PHOTO_TMP_DIR   " "${NRM}Temporary directory where photos will be processed    " "${GRN}[optional]" "${RED}${PHOTO_TMP_DIR}\n" \
+    "${LGRN}<config-file>    " "${BLU}VIDEO_TMP_DIR   " "${NRM}Temporary directory where videos will be processed    " "${GRN}[optional]" "${RED}${VIDEO_TMP_DIR}${NRM}"
+}
+
+# make sure that $1 list of directories exist
+ensure_dirs() { for dir in ${1}; do mkdir -p "${dir}"; done; }
+
+# when $IDEVICE_ID is not set, use id of first Apple device recognized
+validate_idevice_id() {
+  local -r all_idevices="$(idevice_id -l 2>/dev/null || true)"
+
+  if [[ -z "${IDEVICE_ID// }" || ! "${all_idevices}" =~ "${IDEVICE_ID}" ]]; then
+    IDEVICE_ID="$(head -1 <<< "${all_idevices}")"
+
+    if [[ -z "${IDEVICE_ID// }" ]]; then
+      log "No Apple device could be found connected" "${RED}" >&2
+      exit 1
+    fi
+  fi
+}
+
+# mount $IDEVICE_ID with gvfs if it's not already mounted
+mount_idevice() {
+  (gio mount -l | grep -q "^Mount.*${IDEVICE_ID}") || gio mount "afc://${IDEVICE_ID}/"
+}
+
+# copy from DCIM dir of $IDEVICE_ID all $1 type of files to $2 destination dir
+copy_media_files() {
+  rsync -Pah --ignore-missing-args "/run/user/${UID}/gvfs/afc:host=${IDEVICE_ID}/DCIM/100APPLE/"*".${1}" "${2}/"
+}
+
+# rename all photos in $PHOTO_TMP_DIR to $DATE_FORMAT standard
+rename_photos() { (exiv2 -Fvr "${DATE_FORMAT}" mv "${PHOTO_TMP_DIR}/"*) || true; }
+
+# get $1 video creation date in $DATE_FORMAT standard
+get_video_creation_date() {
+  local -r all_params="$(mediainfo "${1}")"
+  local creation_date="$(awk '/^com.apple.quicktime.creationdate/ { print $3 }' <<< "${all_params}")"
+
+  [[ -z "${creation_date// }" ]] &&
+    creation_date="$(awk '/^Encoded date/ { print substr($0, index($0, $4)); exit }' <<< "${all_params}")"
+
+  date -d "${creation_date}" "+${DATE_FORMAT}"
+}
+
+# rename all videos in $VIDEO_TMP_DIR to $DATE_FORMAT standard
+rename_videos() {
+  for video in ${VIDEO_TMP_DIR}/*; do
+    mv -v --backup=numbered "${video}" "${VIDEO_TMP_DIR}/$(get_video_creation_date "${video}").${video##*.}"
+  done
+}
+
+# unmount $IDEVICE_ID with gvfs
+unmount_idevice() { sync; gio mount -u "afc://${IDEVICE_ID}/"; }
+
+
+# main flow
+parse_arguments "${@}"
+load_config "${CFG_FILE}" "iphone-backup.cfg"
+setup_variables
+usage
+ensure_deps "idevice_id gio rsync exiv2 mediainfo"
+validate_idevice_id
+sanity_check
+ensure_dirs "${PHOTO_TARGET_DIR} ${VIDEO_TARGET_DIR} ${PHOTO_TMP_DIR} ${VIDEO_TMP_DIR}"
+
+readonly timestamp="$(date +%s)"
+
+log "[phase 1] mount Apple device '${IDEVICE_ID}'" "${RED}"
+mount_idevice
+
+log "[phase 2] copy media files to temporary directories" "${RED}"
+for ext in "${PHOTO_EXT[@]}"; do copy_media_files "${ext}" "${PHOTO_TMP_DIR}"; done
+for ext in "${VIDEO_EXT[@]}"; do copy_media_files "${ext}" "${VIDEO_TMP_DIR}"; done
+
+log "[phase 3] rename media files to match '${DATE_FORMAT}' date format" "${RED}"
+rename_photos
+rename_videos
+
+log "[phase 4] move media files to target directories" "${RED}"
+mv -v "${PHOTO_TMP_DIR}/"* "${PHOTO_TARGET_DIR}/"
+mv -v "${VIDEO_TMP_DIR}/"* "${VIDEO_TARGET_DIR}/"
+
+log "[phase 5] cleanup and unmount Apple device '${IDEVICE_ID}'" "${RED}"
+rmdir "${PHOTO_TMP_DIR}" "${VIDEO_TMP_DIR}"
+unmount_idevice
+
+log "[success] backup finished" "${RED}"
+log "took: $(print_elapsed_time "${timestamp}")" "${BLU}"
