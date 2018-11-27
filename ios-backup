@@ -13,8 +13,6 @@ setup_variables() {
   fail_when_empty "${PHOTO_TARGET_DIR} ${VIDEO_TARGET_DIR}" "required variables are not set"
   : "${NONINTERACTIVE:=false}"
   : "${DATE_FORMAT:=%Y-%m-%d_%T}"
-  : "${PHOTO_TMP_DIR:=/tmp/photo-tmp}"
-  : "${VIDEO_TMP_DIR:=/tmp/video-tmp}"
 }
 
 # print welcome/info message
@@ -27,9 +25,7 @@ usage() {
     "${LGRN}<config-file>    " "${BLU}PHOTO_TARGET_DIR" "${NRM}Directory where processed photos will be moved        " "${YLW}[required]" "${RED}${PHOTO_TARGET_DIR}\n" \
     "${LGRN}<config-file>    " "${BLU}VIDEO_TARGET_DIR" "${NRM}Directory where processed videos will be moved        " "${YLW}[required]" "${RED}${VIDEO_TARGET_DIR}\n" \
     "${LGRN}<config-file>    " "${BLU}IDEVICE_ID      " "${NRM}Backup specific idevice (if not set, use first found) " "${GRN}[optional]" "${RED}${IDEVICE_ID}\n" \
-    "${LGRN}<config-file>    " "${BLU}DATE_FORMAT     " "${NRM}Rename all media to specific format ('date' compliant)" "${GRN}[optional]" "${RED}${DATE_FORMAT}\n" \
-    "${LGRN}<config-file>    " "${BLU}PHOTO_TMP_DIR   " "${NRM}Temporary directory where photos will be processed    " "${GRN}[optional]" "${RED}${PHOTO_TMP_DIR}\n" \
-    "${LGRN}<config-file>    " "${BLU}VIDEO_TMP_DIR   " "${NRM}Temporary directory where videos will be processed    " "${GRN}[optional]" "${RED}${VIDEO_TMP_DIR}${NRM}"
+    "${LGRN}<config-file>    " "${BLU}DATE_FORMAT     " "${NRM}Rename all media to specific format ('date' compliant)" "${GRN}[optional]" "${RED}${DATE_FORMAT}${NRM}"
 }
 
 # make sure that $1 list of directories exist
@@ -51,16 +47,21 @@ validate_idevice_id() {
 
 # mount $IDEVICE_ID with gvfs if it's not already mounted
 mount_idevice() {
-  (gio mount -l | grep -q "^Mount.*${IDEVICE_ID}") || gio mount "afc://${IDEVICE_ID}/"
+  (gio mount -l | grep -q "^Mount.*afc://${IDEVICE_ID}") || gio mount "afc://${IDEVICE_ID}/"
 }
 
-# copy from DCIM dir of $IDEVICE_ID all $1 type of files to $2 destination dir
+# copy from DCIM dirs of $IDEVICE_ID all $1 type of files to $2 destination dir
 copy_media_files() {
-  rsync -Pah --ignore-missing-args "/run/user/${UID}/gvfs/afc:host=${IDEVICE_ID}/DCIM/100APPLE/"*".${1}" "${2}/"
+  for dir in /run/user/"${UID}"/gvfs/afc:host="${IDEVICE_ID}"/DCIM/*APPLE/; do
+    rsync -Pah --ignore-missing-args "${dir}"*".${1}" "${2}/"
+  done
 }
 
-# rename all photos in $PHOTO_TMP_DIR to $DATE_FORMAT standard
-rename_photos() { (exiv2 -Fvr "${DATE_FORMAT}" mv "${PHOTO_TMP_DIR}/"*) || true; }
+# count files in $1 dir
+count_files() { find "${1}" -maxdepth 1 -mindepth 1 -type f | wc -l; }
+
+# rename all photos in $1 dir to $DATE_FORMAT standard
+rename_photos() { (exiv2 -Fvr "${DATE_FORMAT}" mv "${1}/"*) || true; }
 
 # get $1 video creation date in $DATE_FORMAT standard
 get_video_creation_date() {
@@ -73,10 +74,10 @@ get_video_creation_date() {
   date -d "${creation_date}" "+${DATE_FORMAT}"
 }
 
-# rename all videos in $VIDEO_TMP_DIR to $DATE_FORMAT standard
+# rename all videos in $1 dir to $DATE_FORMAT standard
 rename_videos() {
-  for video in ${VIDEO_TMP_DIR}/*; do
-    mv -v --backup=numbered "${video}" "${VIDEO_TMP_DIR}/$(get_video_creation_date "${video}").${video##*.}"
+  for video in ${1}/*; do
+    mv -v --backup=numbered "${video}" "${1}/$(get_video_creation_date "${video}").${video##*.}"
   done
 }
 
@@ -92,28 +93,33 @@ usage
 ensure_deps "idevice_id gio rsync exiv2 mediainfo"
 validate_idevice_id
 sanity_check
-ensure_dirs "${PHOTO_TARGET_DIR} ${VIDEO_TARGET_DIR} ${PHOTO_TMP_DIR} ${VIDEO_TMP_DIR}"
+ensure_dirs "${PHOTO_TARGET_DIR} ${VIDEO_TARGET_DIR}"
 
+readonly photo_tmp_dir="$(mktemp -d)"
+readonly video_tmp_dir="$(mktemp -d)"
 readonly timestamp="$(date +%s)"
 
 log "[phase 1] mount Apple device '${IDEVICE_ID}'" "${RED}"
 mount_idevice
 
 log "[phase 2] copy media files to temporary directories" "${RED}"
-for ext in "${PHOTO_EXT[@]}"; do copy_media_files "${ext}" "${PHOTO_TMP_DIR}"; done
-for ext in "${VIDEO_EXT[@]}"; do copy_media_files "${ext}" "${VIDEO_TMP_DIR}"; done
+for ext in "${PHOTO_EXT[@]}"; do copy_media_files "${ext}" "${photo_tmp_dir}"; done
+for ext in "${VIDEO_EXT[@]}"; do copy_media_files "${ext}" "${video_tmp_dir}"; done
+readonly photo_counter="$(count_files "${photo_tmp_dir}")"
+readonly video_counter="$(count_files "${video_tmp_dir}")"
 
 log "[phase 3] rename media files to match '${DATE_FORMAT}' date format" "${RED}"
-rename_photos
-rename_videos
+rename_photos "${photo_tmp_dir}"
+rename_videos "${video_tmp_dir}"
 
 log "[phase 4] move media files to target directories" "${RED}"
-mv -v "${PHOTO_TMP_DIR}/"* "${PHOTO_TARGET_DIR}/"
-mv -v "${VIDEO_TMP_DIR}/"* "${VIDEO_TARGET_DIR}/"
+mv -v "${photo_tmp_dir}/"* "${PHOTO_TARGET_DIR}/"
+mv -v "${video_tmp_dir}/"* "${VIDEO_TARGET_DIR}/"
 
 log "[phase 5] cleanup and unmount Apple device '${IDEVICE_ID}'" "${RED}"
-rmdir "${PHOTO_TMP_DIR}" "${VIDEO_TMP_DIR}"
+rmdir "${photo_tmp_dir}" "${video_tmp_dir}"
 unmount_idevice
 
 log "[success] backup finished" "${RED}"
 log "took: $(print_elapsed_time "${timestamp}")" "${BLU}"
+log "copied photos: ${photo_counter} | videos: ${video_counter} | total: $((photo_counter+video_counter))" "${BLU}"
