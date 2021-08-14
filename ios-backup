@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -eo pipefail
+shopt -s nullglob
 
 source "${0%/*}/common.sh"
 
 # constant variables - you should not change these unless you know what are you doing
-readonly PHOTO_EXT=(JPG jpg PNG png)
-readonly VIDEO_EXT=(MOV mov MP4 mp4)
+readonly PHOTO_EXT="jpg|jpeg|png|heic"
+readonly VIDEO_EXT="mov|mp4"
 
 # fail if required variables are not set
 # assign default values for optional variables if not set
@@ -50,18 +51,17 @@ mount_idevice() {
   (gio mount -l | grep -q "^Mount.*afc://${IDEVICE_ID}") || gio mount "afc://${IDEVICE_ID}/"
 }
 
-# copy from DCIM dirs of $IDEVICE_ID all $1 type of files to $2 destination dir
+# copy from DCIM dirs of $IDEVICE_ID all $1 types of files to $2 destination dir
 copy_media_files() {
-  for dir in /run/user/"${UID}"/gvfs/afc:host="${IDEVICE_ID}"/DCIM/*APPLE/; do
-    rsync -Pah --ignore-missing-args "${dir}"*".${1}" "${2}/"
-  done
+  find "/run/user/${UID}/gvfs/afc:host=${IDEVICE_ID}/DCIM" -regextype posix-extended -iregex ".*\.("${1}")" | \
+    rsync -Pah --files-from - --no-relative / "${2}/"
 }
 
 # count files in $1 dir
 count_files() { find "${1}" -maxdepth 1 -mindepth 1 -type f | wc -l; }
 
 # rename all photos in $1 dir to $DATE_FORMAT standard
-rename_photos() { (exiv2 -Fvr "${DATE_FORMAT}" mv "${1}/"*) || true; }
+rename_photos() { (exiv2 -Fvr "${DATE_FORMAT}" rename "${1}/"*) || true; }
 
 # get $1 video creation date in $DATE_FORMAT standard
 get_video_creation_date() {
@@ -82,7 +82,7 @@ rename_videos() {
 }
 
 # unmount $IDEVICE_ID with gvfs
-unmount_idevice() { sync; gio mount -u "afc://${IDEVICE_ID}/"; }
+unmount_idevice() { gio mount -u "afc://${IDEVICE_ID}/"; }
 
 
 # main flow
@@ -95,16 +95,18 @@ validate_idevice_id
 sanity_check
 ensure_dirs "${PHOTO_TARGET_DIR} ${VIDEO_TARGET_DIR}"
 
-readonly photo_tmp_dir="$(mktemp -d)"
-readonly video_tmp_dir="$(mktemp -d)"
 readonly timestamp="$(date +%s)"
+readonly photo_tmp_dir="$(mktemp -d -t ios-backup-photo.XXXXXX)"
+readonly video_tmp_dir="$(mktemp -d -t ios-backup-video.XXXXXX)"
+trap "rm -rf "${photo_tmp_dir}" "${video_tmp_dir}"" EXIT
 
 log "[phase 1] mount Apple device '${IDEVICE_ID}'" "${RED}"
 mount_idevice
+trap "unmount_idevice; $(trap -p EXIT | cut -f2 -d \')" EXIT
 
 log "[phase 2] copy media files to temporary directories" "${RED}"
-for ext in "${PHOTO_EXT[@]}"; do copy_media_files "${ext}" "${photo_tmp_dir}"; done
-for ext in "${VIDEO_EXT[@]}"; do copy_media_files "${ext}" "${video_tmp_dir}"; done
+copy_media_files "${PHOTO_EXT}" "${photo_tmp_dir}"
+copy_media_files "${VIDEO_EXT}" "${video_tmp_dir}"
 readonly photo_counter="$(count_files "${photo_tmp_dir}")"
 readonly video_counter="$(count_files "${video_tmp_dir}")"
 
@@ -113,12 +115,9 @@ rename_photos "${photo_tmp_dir}"
 rename_videos "${video_tmp_dir}"
 
 log "[phase 4] move media files to target directories" "${RED}"
-mv -v "${photo_tmp_dir}/"* "${PHOTO_TARGET_DIR}/"
-mv -v "${video_tmp_dir}/"* "${VIDEO_TARGET_DIR}/"
-
-log "[phase 5] cleanup and unmount Apple device '${IDEVICE_ID}'" "${RED}"
-rmdir "${photo_tmp_dir}" "${video_tmp_dir}"
-unmount_idevice
+rsync -Pah --remove-source-files "${photo_tmp_dir}/" "${PHOTO_TARGET_DIR}/"
+rsync -Pah --remove-source-files "${video_tmp_dir}/" "${VIDEO_TARGET_DIR}/"
+sync
 
 log "[success] backup finished" "${RED}"
 log "took: $(print_elapsed_time "${timestamp}")" "${BLU}"
