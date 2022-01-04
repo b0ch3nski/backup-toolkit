@@ -60,7 +60,7 @@ fail_when_empty() {
 # check if $1 list of binaries is available
 ensure_deps() {
   for bin in ${1}; do
-    command -v ${bin} >/dev/null 2>&1 || {
+    command -v "${bin}" >/dev/null 2>&1 || {
     log "'${bin}' binary could not be found in your system" "${RED}" >&2
     exit 1; }
   done

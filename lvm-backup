@@ -87,7 +87,7 @@ is_low_priority() { [[ "${LOW_PRIORITY}" = true ]] && LOW_PRIORITY="nice -n19 io
 is_backup_status() { [[ "${BACKUP_STATUS}" = true ]] && BACKUP_STATUS="--status" || unset BACKUP_STATUS; }
 
 # transform $1 'vg_name/$SNAP_VOL_PREFIX_original_lv_name' to backup name 'hostname-original_lv_name'
-get_backup_name() { echo "$(hostname)-$(awk -F'_' '{ print $2 }' <<< "${1}")"; }
+get_backup_name() { echo "${HOST:-$(command -v hostnamectl >/dev/null 2>&1 && hostnamectl hostname || hostname)}-$(awk -F'_' '{ print $2 }' <<< "${1}")"; }
 
 # replace '/' with '-' in $1 'vg_name/$SNAP_VOL_PREFIX_original_lv_name'
 get_mount_path() { sed 's/\//-/' <<< "${1}"; }
