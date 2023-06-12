@@ -40,8 +40,8 @@ parse_arguments() {
 load_config() {
   [[ -f "${1}" ]] && CFG_FILE="${1}" || CFG_FILE="${0%/*}/${2}"
 
-  if egrep -vq "${CFG_VALID_PATTERN}" "${CFG_FILE}"; then
-    log "syntax error in config file '${CFG_FILE}' - offending lines:\n$(egrep -vn "${CFG_VALID_PATTERN}" "${CFG_FILE}")" "${RED}" >&2
+  if grep -Evq "${CFG_VALID_PATTERN}" "${CFG_FILE}"; then
+    log "syntax error in config file '${CFG_FILE}' - offending lines:\n$(grep -Evn "${CFG_VALID_PATTERN}" "${CFG_FILE}")" "${RED}" >&2
     exit 1
   fi
   source "${CFG_FILE}"
